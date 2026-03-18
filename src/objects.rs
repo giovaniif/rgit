@@ -44,6 +44,13 @@ pub struct TreeEntry {
     pub name: String
 }
 
+pub struct Commit {
+    pub tree_hash: Hash,
+    pub parent_hash: Option<Hash>,
+    pub author: String,
+    pub message: String,
+}
+
 fn prepare_blob(content: &[u8]) -> Vec<u8> {
     let header = format!("blob {}\0", content.len());
     let mut data = Vec::with_capacity(header.len() + content.len());
@@ -136,6 +143,25 @@ pub fn store_object(repo_root: &Path, full_data: &[u8]) -> std::io::Result<Hash>
 pub fn store_blob(repo_root: &Path, content: &[u8]) -> std::io::Result<Hash> {
     let data = prepare_blob(content);
     store_object(repo_root, &data)
+}
+
+pub fn prepare_commit(commit: &Commit) -> Vec<u8> {
+    let mut body = String::new();
+
+    body.push_str(&format!("tree {}\n", commit.tree_hash.as_str()));
+
+    if let Some(parent) = &commit.parent_hash {
+        body.push_str(&format!("parent {}\n", parent.as_str()));
+    }
+
+    body.push_str(&format!("author {}\n", commit.author));
+    body.push_str(&format!("\n{}\n", commit.message));
+
+    let header = format!("commit {}\0", body.len());
+    let mut full_data = Vec::with_capacity(header.len() + body.len());
+    full_data.extend_from_slice(header.as_bytes());
+    full_data.extend_from_slice(body.as_bytes());
+    full_data
 }
 
 #[cfg(test)]
@@ -235,6 +261,52 @@ mod tests {
 
         assert!(tree_path.exists());
         assert_ne!(tree_hash.as_str(), "95d09f2b10159347eece71399a7e2e907ea3df4f");
+    }
+
+    #[test]
+    fn test_commit_formatting() {
+       let tree_hash = Hash::new("95d09f2b10159347eece71399a7e2e907ea3df4f".to_string());
+       
+       let commit = Commit {
+            tree_hash,
+            parent_hash: None,
+            author: "Giovani <gio@example.com>".to_string(),
+            message: "Initial commit".to_string(),
+       };
+
+       let commit_data = prepare_commit(&commit);
+
+       assert!(commit_data.starts_with(b"commit"));
+       assert!(commit_data.windows(14).any(|w| w == b"Initial commit"));
+    }
+
+    #[test]
+    fn test_full_git_flow() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path();
+
+        let blob_hash = store_blob(repo_path, b"hello rust").unwrap();
+
+        let entries = vec![TreeEntry {
+            mode: "100644".to_string(),
+            otype: ObjectType::Blob,
+            hash: blob_hash,
+            name: "main.rs".to_string(),
+        }];
+        let tree_data = prepare_tree(&entries);
+        let tree_hash = store_object(repo_path, &tree_data).unwrap();
+
+        let commit = Commit {
+            tree_hash,
+            parent_hash: None,
+            author: "Developer <dev@rgit.com>".to_string(),
+            message:  "First snapshot".to_string(),
+        };
+        let commit_data = prepare_commit(&commit);
+        let commit_hash = store_object(repo_path, &commit_data).unwrap();
+
+        assert!(repo_path.join(".rgit/objects").exists());
+        println!("Commit Hash: {}", commit_hash.as_str());
     }
 }
 
