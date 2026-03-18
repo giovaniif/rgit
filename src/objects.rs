@@ -9,6 +9,11 @@ use flate2::read::ZlibDecoder;
 
 pub struct Hash(String);
 
+pub enum ObjectType {
+    Blob,
+    Tree,
+}
+
 impl Hash {
     pub fn new(hex: String) -> Self {
         Self(hex)
@@ -21,6 +26,22 @@ impl Hash {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+impl ObjectType {
+    pub fn as_str(&self) -> &str {
+        match self {
+            ObjectType::Blob => "blob",
+            ObjectType::Tree => "tree",
+        }
+    }
+}
+
+pub struct TreeEntry {
+    pub mode: String,
+    pub otype: ObjectType,
+    pub hash: Hash,
+    pub name: String
 }
 
 fn prepare_blob(content: &[u8]) -> Vec<u8> {
@@ -56,24 +77,6 @@ pub fn get_object_path(hash: &str) -> (String, String) {
     (dir.to_string(), file.to_string())
 }
 
-pub fn store_blob(repo_root: &Path, content: &[u8]) -> std::io::Result<Hash> {
-    let full_data = prepare_blob(content);
-    let hash = hash_data(&full_data);
-
-    let (prefix, rest) = hash.fan_out();
-    let object_path = repo_root.join(".rgit/objects").join(prefix).join(rest);
-
-    if !object_path.exists() {
-        fs::create_dir_all(object_path.parent().unwrap())?;
-        let file = fs::File::create(object_path)?;
-        let mut encoder = ZlibEncoder::new(file, Compression::default());
-        encoder.write_all(&full_data)?;
-        encoder.finish()?;
-    }
-
-    Ok(hash)
-}
-
 pub fn read_blob(repo_root: &Path, hash: &Hash) -> std::io::Result<Vec<u8>> {
     let (prefix, rest) = hash.fan_out();
     let object_path = repo_root.join(".rgit/objects").join(prefix).join(rest);
@@ -91,6 +94,48 @@ pub fn read_blob(repo_root: &Path, hash: &Hash) -> std::io::Result<Vec<u8>> {
             "Invalid Git object: missing null terminator"
         ))
     }
+}
+
+pub fn prepare_tree(entries: &[TreeEntry]) -> Vec<u8> {
+    let mut body = Vec::new();
+
+    for entry in entries {
+        let line = format!(
+            "{} {} {}\t{}\n",
+            entry.mode,
+            entry.otype.as_str(),
+            entry.hash.as_str(),
+            entry.name
+        );
+        body.extend_from_slice(line.as_bytes());
+    }
+
+    let header = format!("tree {}\0", body.len());
+    let mut full_data = Vec::with_capacity(header.len() + body.len());
+    full_data.extend_from_slice(header.as_bytes());
+    full_data.extend_from_slice(&body);
+    full_data
+}
+
+pub fn store_object(repo_root: &Path, full_data: &[u8]) -> std::io::Result<Hash> {
+    let hash = hash_data(full_data);
+    let (prefix, rest) = hash.fan_out();
+    let object_path = repo_root.join(".rgit/objects").join(prefix).join(rest);
+
+    if !object_path.exists() {
+        fs::create_dir_all(object_path.parent().unwrap())?;
+        let file = fs::File::create(object_path)?;
+        let mut encoder = ZlibEncoder::new(file, Compression::default());
+        encoder.write_all(full_data)?;
+        encoder.finish()?;
+    }
+
+    Ok(hash)
+}
+
+pub fn store_blob(repo_root: &Path, content: &[u8]) -> std::io::Result<Hash> {
+    let data = prepare_blob(content);
+    store_object(repo_root, &data)
 }
 
 #[cfg(test)]
@@ -140,6 +185,56 @@ mod tests {
         let read_result = read_blob(repo_path, &hash).expect("Failed to read blob");
 
         assert_eq!(read_result, original_content);
+    }
+    
+    #[test]
+    fn test_tree_formatting() {
+        let entries = vec![
+            TreeEntry {
+                mode: "100644".to_string(),
+                otype: ObjectType::Blob,
+                hash: Hash::new("95d09f2b10159347eece71399a7e2e907ea3df4f".to_string()),
+                name: "hello.txt".to_string(),
+            },
+        ];
+
+        let tree_data = prepare_tree(&entries);
+
+        assert!(tree_data.starts_with(b"tree"));
+        assert!(tree_data.windows(9).any(|w| w == b"hello.txt"));
+    }
+
+    #[test]
+    fn test_tree_with_multiple_blobs() {
+       let dir = tempdir().unwrap();
+       let repo_path = dir.path();
+
+       let hash_a = store_blob(repo_path, b"content of a").unwrap();
+       let hash_b = store_blob(repo_path, b"content of b").unwrap();
+
+        let entries = vec![
+            TreeEntry {
+                mode: "100644".to_string(),
+                otype: ObjectType::Blob,
+                hash: hash_a,
+                name: "a.txt".to_string(),
+            },
+            TreeEntry {
+                mode: "100644".to_string(),
+                otype: ObjectType::Blob,
+                hash: hash_b,
+                name: "b.txt".to_string(),
+            },
+        ];
+
+        let tree_data = prepare_tree(&entries);
+        let tree_hash = store_object(repo_path, &tree_data).expect("Failed to store tree");
+
+        let (prefix, rest) = tree_hash.fan_out();
+        let tree_path = repo_path.join(".rgit/objects").join(prefix).join(rest);
+
+        assert!(tree_path.exists());
+        assert_ne!(tree_hash.as_str(), "95d09f2b10159347eece71399a7e2e907ea3df4f");
     }
 }
 
