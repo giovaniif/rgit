@@ -2,9 +2,40 @@ use sha1::{Sha1, Digest};
 use std::path::Path;
 use std::io::Write;
 use std::fs;
-use std::fs::File;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use std::io::Read;
+use flate2::read::ZlibDecoder;
+
+pub struct Hash(String);
+
+impl Hash {
+    pub fn new(hex: String) -> Self {
+        Self(hex)
+    }
+
+    pub fn fan_out(&self) -> (&str, &str) {
+        self.0.split_at(2)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn prepare_blob(content: &[u8]) -> Vec<u8> {
+    let header = format!("blob {}\0", content.len());
+    let mut data = Vec::with_capacity(header.len() + content.len());
+    data.extend_from_slice(header.as_bytes());
+    data.extend_from_slice(content);
+    data
+}
+
+pub fn hash_data(data: &[u8]) -> Hash {
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    Hash::new(hex::encode(hasher.finalize()))
+}
 
 pub fn hash_blob(content: &[u8]) -> String {
     let header = format!("blob {}\0", content.len());
@@ -25,26 +56,41 @@ pub fn get_object_path(hash: &str) -> (String, String) {
     (dir.to_string(), file.to_string())
 }
 
-pub fn store_blob(repo_root: &Path, content: &[u8]) -> std::io::Result<String> {
-    let header = format!("blob {}\0", content.len());
-    let mut full_data = Vec::new();
-    full_data.extend_from_slice(header.as_bytes());
-    full_data.extend_from_slice(content);
+pub fn store_blob(repo_root: &Path, content: &[u8]) -> std::io::Result<Hash> {
+    let full_data = prepare_blob(content);
+    let hash = hash_data(&full_data);
 
-    let hash = hash_blob(content);
-    let (prefix, rest) = hash.split_at(2);
+    let (prefix, rest) = hash.fan_out();
+    let object_path = repo_root.join(".rgit/objects").join(prefix).join(rest);
 
-    let object_dir = repo_root.join(".rgit/objects").join(prefix);
-    fs::create_dir_all(&object_dir)?;
-
-    let object_path = object_dir.join(rest);
-
-    let file = File::create(object_path)?;
-    let mut encoder = ZlibEncoder::new(file, Compression::default());
-    encoder.write_all(&full_data)?;
-    encoder.finish()?;
+    if !object_path.exists() {
+        fs::create_dir_all(object_path.parent().unwrap())?;
+        let file = fs::File::create(object_path)?;
+        let mut encoder = ZlibEncoder::new(file, Compression::default());
+        encoder.write_all(&full_data)?;
+        encoder.finish()?;
+    }
 
     Ok(hash)
+}
+
+pub fn read_blob(repo_root: &Path, hash: &Hash) -> std::io::Result<Vec<u8>> {
+    let (prefix, rest) = hash.fan_out();
+    let object_path = repo_root.join(".rgit/objects").join(prefix).join(rest);
+
+    let file = fs::File::open(object_path)?;
+    let mut decoder = ZlibDecoder::new(file);
+    let mut full_contents = Vec::new();
+    decoder.read_to_end(&mut full_contents)?;
+
+    if let Some(null_pos) = full_contents.iter().position(|&b| b == 0) {
+        Ok(full_contents[null_pos + 1..].to_vec())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid Git object: missing null terminator"
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -78,12 +124,22 @@ mod tests {
         let repo_path = dir.path();
         let content = b"hello world";
 
-        let hash = store_blob(repo_path, content).expect("Failed to store blob");
+        let hash = store_blob(repo_path, content).expect("Failed to store");
 
-        let (prefix, rest) = hash.split_at(2);
-        let object_path = repo_path.join(".rgit/objects").join(prefix).join(rest);
+        assert_eq!(hash.as_str(), "95d09f2b10159347eece71399a7e2e907ea3df4f");
+    }
 
-        assert!(object_path.exists());
+    #[test]
+    fn test_read_blob_content() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path();
+        let original_content = b"rust git project";
+
+        let hash = store_blob(repo_path, original_content).unwrap();
+
+        let read_result = read_blob(repo_path, &hash).expect("Failed to read blob");
+
+        assert_eq!(read_result, original_content);
     }
 }
 
