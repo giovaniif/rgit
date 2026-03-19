@@ -18,6 +18,11 @@ enum Commands {
         #[arg(short, long)]
         write: bool,
     },
+    CatFile {
+        hash: String,
+        #[arg(short, long)]
+        pretty: bool,
+    },
 }
 
 fn main() {
@@ -49,6 +54,23 @@ fn main() {
             } else {
                 let hash = rgit::objects::hash_blob(&content);
                 println!("{}", hash);
+            }
+        }
+
+        Commands::CatFile { hash, pretty } => {
+            let repo_root = Path::new(".");
+            let hash_obj = rgit::objects::Hash::new(hash.clone());
+
+            match rgit::objects::read_blob(repo_root, &hash_obj) {
+                Ok(content) => {
+                    if *pretty {
+                        println!("{}", String::from_utf8_lossy(&content));
+                    } else {
+                        use std::io::Write;
+                        std::io::stdout().write_all(&content).unwrap();
+                    }
+                }
+                Err(e) => eprintln!("Error: {}", e),
             }
         }
     }
