@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use rgit::objects;
 use std::fs;
 use std::path::Path;
 
@@ -23,6 +24,12 @@ enum Commands {
         #[arg(short, long)]
         pretty: bool,
     },
+    LsTree {
+        hash: String,
+        #[arg(short, long)]
+        name_only: bool,
+    },
+    WriteTree,
 }
 
 fn main() {
@@ -71,6 +78,39 @@ fn main() {
                     }
                 }
                 Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+
+        Commands::LsTree { hash, name_only } => {
+            let repo_root = std::path::Path::new(".");
+            let hash_object = objects::Hash::new(hash.clone());
+
+            match objects::read_blob(repo_root, &hash_object) {
+                Ok(content) => {
+                    let entries = objects::parse_tree(&content);
+                    for entry in entries {
+                        if *name_only {
+                            println!("{}", entry.name);
+                        } else {
+                            println!(
+                                "{:06} {} {}\t{}",
+                                entry.mode,
+                                entry.otype.as_str(),
+                                entry.hash.as_str(),
+                                entry.name
+                            );
+                        }
+                    }
+                }
+                Err(_e) => eprintln!("fatal: Not a valid tree name {}", hash),
+            }
+        }
+
+        Commands::WriteTree => {
+            let repo_root = Path::new(".");
+            match objects::write_tree(repo_root) {
+                Ok(hash) => println!("{}", hash.as_str()),
+                Err(e) => eprintln!("Error writing tree: {}", e),
             }
         }
     }

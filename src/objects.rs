@@ -164,6 +164,67 @@ pub fn prepare_commit(commit: &Commit) -> Vec<u8> {
     full_data
 }
 
+pub fn parse_tree(data: &[u8]) -> Vec<TreeEntry> {
+    let s = String::from_utf8_lossy(data);
+    let mut entries = Vec::new();
+
+    for line in s.lines() {
+        if line.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.splitn(2, '\t').collect();
+        let metadata: Vec<&str> = parts[0].split_whitespace().collect();
+
+        if parts.len() == 2 && metadata.len() == 3 {
+            entries.push(TreeEntry {
+                mode:  metadata[0].to_string(),
+                otype: if metadata[1] == "blob" { ObjectType::Blob } else { ObjectType::Tree },
+                hash: Hash::new(metadata[2].to_string()),
+                name: parts[1].to_string()
+            })
+        }
+    }
+
+    entries
+}
+
+
+pub fn write_tree(repo_root: &Path) -> std::io::Result<Hash> {
+    let objects_dir = repo_root.join(".rgit/objects");
+    if !objects_dir.exists() {
+        fs::create_dir_all(&objects_dir)?;
+    }
+
+    let mut entries = Vec::new();
+
+    for entry in fs::read_dir(repo_root)? {
+        let entry = entry?; 
+        let path = entry.path();
+        let name = entry.file_name().into_string().unwrap();
+
+        if name == ".rgit" || name == "target" || name == ".git" {
+            continue;
+        }
+
+        if path.is_file() {
+            let content = fs::read(&path)?;
+            let blob_hash = store_blob(repo_root, &content)?;
+
+            entries.push(TreeEntry {
+                mode: "100644".to_string(),
+                otype: ObjectType::Blob,
+                hash: blob_hash,
+                name
+            });
+        }
+    }
+
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let tree_data = prepare_tree(&entries);
+    store_object(repo_root, &tree_data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +368,52 @@ mod tests {
 
         assert!(repo_path.join(".rgit/objects").exists());
         println!("Commit Hash: {}", commit_hash.as_str());
+    }
+
+    #[test]
+    fn test_tree_roundtrip() {
+        let hash_str = "95d09f2b10159347eece71399a7e2e907ea3df4f";
+        let entries = vec![
+            TreeEntry {
+                mode: "10644".to_string(),
+                otype: ObjectType::Blob,
+                hash: Hash::new(hash_str.to_string()),
+                name: "main.rs".to_string()
+            },
+        ];
+
+        let encoded = prepare_tree(&entries);
+
+        let null_pos = encoded.iter().position(|&b| b == 0).unwrap();
+        let body = &encoded[null_pos + 1..];
+
+        let decoded = parse_tree(body);
+
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].name, "main.rs");
+        assert_eq!(decoded[0].hash.as_str(), hash_str);
+    }
+
+    #[test]
+    fn test_write_tree_from_dist() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path();
+
+        let file1_path = repo_path.join("a.txt");
+        let file2_path = repo_path.join("b.txt");
+        fs::write(&file1_path, "content a").unwrap();
+        fs::write(&file2_path, "content b").unwrap();
+
+        let tree_hash = write_tree(repo_path).expect("write_tree failed") ;
+
+        assert!(repo_path.join(".rgit/objects").exists());
+
+        let tree_content = read_blob(repo_path, &tree_hash).unwrap();
+        let entries = parse_tree(&tree_content);
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|e| e.name == "a.txt"));
+        assert!(entries.iter().any(|e| e.name == "b.txt"));
     }
 }
 
