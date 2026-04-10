@@ -1,1 +1,2 @@
-pub mod objects;
+pub mod domain;
+pub mod store;

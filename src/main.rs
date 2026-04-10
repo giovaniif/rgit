@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
-use rgit::objects::{self};
-use std::fs;
+use rgit::{domain::{blob::Blob, commit::Commit, hash::Hash, tree::Tree}, store::{object_store, repo::Repo}};
 use std::path::Path;
 
 #[derive(Parser)]
@@ -41,160 +40,97 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
+    let repo = Repo::new(Path::new("."));
 
     match &cli.command {
         Commands::Init => {
-            match init_repo() {
-                Ok(_) => println!("Initialized empty rgit repository in .rgit/"),
-                Err(e) => eprintln!("Error: {}", e),
+            if let Err(e) = repo.init() {
+                eprintln!("Error: initializing repository {}", e);
+            } else {
+                println!("Initialized empty rgit repository in .rgit/");
             }
         }
 
        Commands::HashObject { file, write } => {
-            let path = Path::new(file);
-            if !path.exists() {
-                eprintln!("File not found: {}", file);
-                return;
-            }
-
-            let content = fs::read(path).expect("Could not read file");
-
-            if *write {
-                let repo_root = Path::new(".");
-                match rgit::objects::store_blob(repo_root, &content) {
-                    Ok(hash) => println!("{}", hash.as_str()),
-                    Err(e) => eprintln!("Error storing blob: {}", e),
-                }
+            let content = std::fs::read(file).expect("Could not read file");
+            if *write{
+                let hash = Blob::store(&repo.root, &content).unwrap();
+                println!("{}", hash.as_str());
             } else {
-                let hash = rgit::objects::hash_blob(&content);
-                println!("{}", hash);
+                let hash = Hash::from_bytes(&Blob::prepare(&content));
+                println!("{}", hash.as_str());
+            }
+       }
+
+        Commands::CatFile { hash, pretty } => {
+            let hash_obj = Hash::new(hash.clone());
+            match object_store::read(&repo.root, &hash_obj) {
+                Ok(full_data) => {
+                    if let Some(null_pos) = full_data.iter().position(|&b| b == 0) {
+                        let content = &full_data[null_pos + 1..];
+                        if *pretty {
+                            print!("{}", String::from_utf8_lossy(content));
+                        } else {
+                            use std::io::Write;
+                            std::io::stdout().write_all(content).unwrap();
+                        }
+                    }
+                }
+                Err(e) => eprintln!("fatal: Not a valid object name {}: {}", hash, e),
             }
         }
 
-        Commands::CatFile { hash, pretty } => {
-            let repo_root = Path::new(".");
-            let hash_obj = rgit::objects::Hash::new(hash.clone());
-
-            match rgit::objects::read_blob(repo_root, &hash_obj) {
-                Ok(content) => {
-                    if *pretty {
-                        println!("{}", String::from_utf8_lossy(&content));
-                    } else {
-                        use std::io::Write;
-                        std::io::stdout().write_all(&content).unwrap();
+        Commands::LsTree { hash, name_only: _ } => {
+            let hash_obj = Hash::new(hash.clone());
+            match object_store::read(&repo.root, &hash_obj) {
+                Ok(data) => {
+                    let null_pos = data.iter().position(|&b| b == 0).unwrap();
+                    let entries = Tree::parse(&data[null_pos + 1..]);
+                    for entry in entries {
+                        println!("{:06} {} {}\t{}", entry.mode, entry.otype.as_str(), entry.hash.as_str(), entry.name);
                     }
                 }
                 Err(e) => eprintln!("Error: {}", e),
             }
         }
 
-        Commands::LsTree { hash, name_only } => {
-            let repo_root = std::path::Path::new(".");
-            let hash_object = objects::Hash::new(hash.clone());
-
-            match objects::read_blob(repo_root, &hash_object) {
-                Ok(content) => {
-                    let entries = objects::parse_tree(&content);
-                    for entry in entries {
-                        if *name_only {
-                            println!("{}", entry.name);
-                        } else {
-                            println!(
-                                "{:06} {} {}\t{}",
-                                entry.mode,
-                                entry.otype.as_str(),
-                                entry.hash.as_str(),
-                                entry.name
-                            );
-                        }
-                    }
-                }
-                Err(_e) => eprintln!("fatal: Not a valid tree name {}", hash),
-            }
-        }
-
         Commands::WriteTree => {
-            let repo_root = Path::new(".");
-            match objects::write_tree(repo_root) {
+            match Tree::write_from_path(&repo.root) {
                 Ok(hash) => println!("{}", hash.as_str()),
-                Err(e) => eprintln!("Error writing tree: {}", e),
+                Err(e) => eprintln!("Error: {}", e),
             }
         }
 
         Commands::Commit { message, author } => {
-            let repo_root = Path::new(".");
+            let tree_hash = Tree::write_from_path(&repo.root).expect("Tree write failed");
+            let parent_hash = repo.get_head_hash().map(Hash::new);
 
-            let tree_hash = objects::write_tree(repo_root).expect("Failed to write tree");
-
-            let parent_path = repo_root.join(".rgit/refs/heads/main");
-            let parent_hash = if parent_path.exists() {
-                let h = fs::read_to_string(&parent_path).unwrap().trim().to_string();
-                Some(objects::Hash::new(h))
-            } else {
-                None
-            };
-
-            let commit = objects::Commit {
+            let commit = Commit {
                 tree_hash,
                 parent_hash,
                 author: author.clone(),
                 message: message.clone(),
             };
 
-            let commit_data = objects::prepare_commit(&commit);
-            let commit_hash = objects::store_object(repo_root, &commit_data).expect("Failed to store commit");
+            let commit_data = commit.prepare();
+            let commit_hash = object_store::write(&repo.root, &commit_data).expect("Commit storage failed");
 
-            fs::write(parent_path, format!("{}\n", commit_hash.as_str())).unwrap();
-
+            repo.update_head(&commit_hash).expect("Failed to update HEAD");
             println!("[main {}] {}", &commit_hash.as_str()[..7], message);
         }
 
         Commands::Log => {
-            let repo_root = Path::new(".");
-            let main_ref_path = repo_root.join(".rgit/refs/heads/main");
-
-            if !main_ref_path.exists() {
-                eprintln!("fatal: your current branch 'main' does not have any commits yet");
-                return;
-            }
-
-            let head_hash_str = fs::read_to_string(main_ref_path)
-                .expect("Failed to read main ref")
-                .trim()
-                .to_string();
-
-            let mut current_hash: Option<objects::Hash> = Some(objects::Hash::new(head_hash_str));
-
+            let mut current_hash = repo.get_head_hash().map(Hash::new);
             while let Some(hash) = current_hash {
-                match objects::read_blob(repo_root, &hash) {
-                    Ok(data) => {
-                        let commit = objects::parse_commit(&data);
+                let data = object_store::read(&repo.root, &hash).unwrap();
+                let commit = Commit::parse(&data);
 
-                        println!("\x1b[33mcommit {}\x1b[0m", hash.as_str());
-                        println!("Author: {}", commit.author);
-                        println!("\n   {}\n", commit.message);
+                println!("\x1b[33commit {}\x1b[0m]", hash.as_str());
+                println!("Author: {}", commit.author);
+                println!("\n   {}\n", commit.message);
 
-                        current_hash = commit.parent_hash;
-                    }
-                    Err(_) => break,
-                }
+                current_hash = commit.parent_hash;
             }
         }
     }
-}
-
-fn init_repo() -> std::io::Result<()> {
-    let base_dir = Path::new(".rgit");
-
-    if !base_dir.exists() {
-        fs::create_dir(base_dir)?;
-    }
-
-    fs::create_dir_all(base_dir.join("objects"))?;
-    fs::create_dir_all(base_dir.join("refs/heads"))?;
-
-    let head_path = base_dir.join("HEAD");
-    fs::write(head_path, "ref: refs/heads/main\n")?;
-
-    Ok(())
 }
