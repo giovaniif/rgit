@@ -165,6 +165,32 @@ pub fn prepare_commit(commit: &Commit) -> Vec<u8> {
     full_data
 }
 
+pub fn parse_commit(data: &[u8]) -> Commit {
+    let s = String::from_utf8_lossy(data);
+    let mut tree_hash = Hash::new(String::new());
+    let mut parent_hash = None;
+    let mut author = String::new();
+    let mut message = String::new();
+
+    let mut lines = s.lines();
+    while let Some(line) = lines.next() {
+        if line.is_empty() {
+            message = lines.collect::<Vec<_>>().join("\n");
+            break;
+        }
+
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        match parts[0] {
+            "tree" => tree_hash = Hash::new(parts[1].to_string()),
+            "parent" => parent_hash = Some(Hash::new(parts[1].to_string())),
+            "author" => author = parts[1].to_string(),
+            _ => {}
+        }
+    }
+
+    Commit { tree_hash, parent_hash, author, message }
+}
+
 pub fn parse_tree(data: &[u8]) -> Vec<TreeEntry> {
     let s = String::from_utf8_lossy(data);
     let mut entries = Vec::new();
@@ -447,6 +473,41 @@ mod tests {
         let read_data = read_blob(repo_path, &hash2).unwrap();
         let content = String::from_utf8_lossy(&read_data);
         assert!(content.contains(hash1.as_str()));
+    }
+
+    #[test]
+    fn test_commit_history_traversal() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path();
+        let tree_hash = write_tree(repo_path).unwrap();
+
+        let ca = Commit {
+            tree_hash: tree_hash.clone(),
+            parent_hash: None,
+            author: "User <u@ex.com>".to_string(),
+            message: "Commit A".to_string(),
+        };
+        let hash_a = store_object(repo_path, &prepare_commit(&ca)).unwrap();
+
+        let cb = Commit {
+            tree_hash,
+            parent_hash: Some(hash_a.clone()),
+            author: "User <u@ex.com>".to_string(),
+            message: "Commit B".to_string(),
+        };
+        let hash_b = store_object(repo_path, &prepare_commit(&cb)).unwrap();
+
+        let mut history = Vec::new();
+        let mut current_hash = Some(hash_b);
+
+        while let Some(hash) = current_hash {
+            let data = read_blob(repo_path, &hash).unwrap();
+            let commit = parse_commit(&data);
+            history.push(commit.message.clone());
+            current_hash = commit.parent_hash;
+        }
+
+        assert_eq!(history, vec!["Commit B", "Commit A"]);
     }
 }
 

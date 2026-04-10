@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use rgit::objects;
+use rgit::objects::{self};
 use std::fs;
 use std::path::Path;
 
@@ -35,7 +35,8 @@ enum Commands {
         message: String,
         #[arg(short, long, default_value = "User <user@example.com>")]
         author: String,
-    }
+    },
+    Log,
 }
 
 fn main() {
@@ -146,6 +147,38 @@ fn main() {
             fs::write(parent_path, format!("{}\n", commit_hash.as_str())).unwrap();
 
             println!("[main {}] {}", &commit_hash.as_str()[..7], message);
+        }
+
+        Commands::Log => {
+            let repo_root = Path::new(".");
+            let main_ref_path = repo_root.join(".rgit/refs/heads/main");
+
+            if !main_ref_path.exists() {
+                eprintln!("fatal: your current branch 'main' does not have any commits yet");
+                return;
+            }
+
+            let head_hash_str = fs::read_to_string(main_ref_path)
+                .expect("Failed to read main ref")
+                .trim()
+                .to_string();
+
+            let mut current_hash: Option<objects::Hash> = Some(objects::Hash::new(head_hash_str));
+
+            while let Some(hash) = current_hash {
+                match objects::read_blob(repo_root, &hash) {
+                    Ok(data) => {
+                        let commit = objects::parse_commit(&data);
+
+                        println!("\x1b[33mcommit {}\x1b[0m", hash.as_str());
+                        println!("Author: {}", commit.author);
+                        println!("\n   {}\n", commit.message);
+
+                        current_hash = commit.parent_hash;
+                    }
+                    Err(_) => break,
+                }
+            }
         }
     }
 }
