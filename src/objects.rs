@@ -7,6 +7,7 @@ use flate2::Compression;
 use std::io::Read;
 use flate2::read::ZlibDecoder;
 
+#[derive(Clone)]
 pub struct Hash(String);
 
 pub enum ObjectType {
@@ -414,6 +415,38 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert!(entries.iter().any(|e| e.name == "a.txt"));
         assert!(entries.iter().any(|e| e.name == "b.txt"));
+    }
+
+    #[test]
+    fn test_commit_chaining() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path();
+
+        let tree_hash = write_tree(repo_path).unwrap();
+
+        let commit1 = Commit {
+            tree_hash: tree_hash.clone(),
+            parent_hash: None,
+            author: "Gio <gio@rgit.com>".to_string(),
+            message: "Initial commit".to_string(),
+        };
+        let commit1_data = prepare_commit(&commit1);
+        let hash1 = store_object(repo_path, &commit1_data).unwrap();
+
+        let commit2 = Commit {
+            tree_hash: tree_hash.clone(),
+            parent_hash: Some(hash1.clone()),
+            author: "Gio <gio@rgit.com>".to_string(),
+            message: "Second commit".to_string(),
+        };
+        let commit2_data = prepare_commit(&commit2);
+        let hash2 = store_object(repo_path, &commit2_data).unwrap();
+
+        assert_ne!(hash1.as_str(), hash2.as_str());
+
+        let read_data = read_blob(repo_path, &hash2).unwrap();
+        let content = String::from_utf8_lossy(&read_data);
+        assert!(content.contains(hash1.as_str()));
     }
 }
 

@@ -30,6 +30,12 @@ enum Commands {
         name_only: bool,
     },
     WriteTree,
+    Commit {
+        #[arg(short, long)]
+        message: String,
+        #[arg(short, long, default_value = "User <user@example.com>")]
+        author: String,
+    }
 }
 
 fn main() {
@@ -112,6 +118,34 @@ fn main() {
                 Ok(hash) => println!("{}", hash.as_str()),
                 Err(e) => eprintln!("Error writing tree: {}", e),
             }
+        }
+
+        Commands::Commit { message, author } => {
+            let repo_root = Path::new(".");
+
+            let tree_hash = objects::write_tree(repo_root).expect("Failed to write tree");
+
+            let parent_path = repo_root.join(".rgit/refs/heads/main");
+            let parent_hash = if parent_path.exists() {
+                let h = fs::read_to_string(&parent_path).unwrap().trim().to_string();
+                Some(objects::Hash::new(h))
+            } else {
+                None
+            };
+
+            let commit = objects::Commit {
+                tree_hash,
+                parent_hash,
+                author: author.clone(),
+                message: message.clone(),
+            };
+
+            let commit_data = objects::prepare_commit(&commit);
+            let commit_hash = objects::store_object(repo_root, &commit_data).expect("Failed to store commit");
+
+            fs::write(parent_path, format!("{}\n", commit_hash.as_str())).unwrap();
+
+            println!("[main {}] {}", &commit_hash.as_str()[..7], message);
         }
     }
 }
