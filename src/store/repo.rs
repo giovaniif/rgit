@@ -15,7 +15,7 @@ impl Repo {
     pub fn init(&self) -> std::io::Result<()> {
         fs::create_dir_all(self.root.join(".rgit/objects"))?;
         fs::create_dir_all(self.root.join(".rgit/refs/heads"))?;
-        fs::write(self.root.join(".rigt/HEAD"), "ref: refs/heads/main/\n")?;
+        fs::write(self.root.join(".rgit/HEAD"), "ref: refs/heads/main\n")?;
         Ok(())
     }
 

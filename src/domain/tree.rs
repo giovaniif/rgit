@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{collections::HashMap, fs, path::Path};
 
 use crate::{domain::{hash::Hash}, store::object_store};
 
@@ -88,5 +88,17 @@ impl Tree {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let data = Self::prepare(&entries);
         object_store::write(repo_root, &data)
+    }
+
+    pub fn get_entries_map(repo_root: &Path, tree_hash: &Hash) -> std::io::Result<HashMap<String, Hash>> {
+        let data = object_store::read(repo_root, tree_hash)?;
+        let null_pos = data.iter().position(|&b| b == 0).unwrap();
+        let entries = Self::parse(&data[null_pos + 1..]);
+
+        let mut map = HashMap::new();
+        for entry in entries {
+            map.insert(entry.name, entry.hash);
+        }
+        Ok(map)
     }
 }

@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
-use rgit::{domain::{blob::Blob, commit::Commit, hash::Hash, tree::Tree}, store::{object_store, repo::Repo}};
-use std::path::Path;
+use rgit::{domain::{blob::Blob, commit::Commit, hash::Hash, tree::Tree, status::FileState}, store::{object_store, repo::Repo}};
+use rgit::domain;
+use std::{collections::HashMap, path::Path};
 
 #[derive(Parser)]
 #[command(name = "rgit")]
@@ -36,6 +37,7 @@ enum Commands {
         author: String,
     },
     Log,
+    Status,
 }
 
 fn main() {
@@ -130,6 +132,33 @@ fn main() {
                 println!("\n   {}\n", commit.message);
 
                 current_hash = commit.parent_hash;
+            }
+        }
+
+        Commands::Status => {
+            let head_hash = repo.get_head_hash().map(Hash::new);
+            let head_entries = if let Some(hash) = head_hash {
+                let commit_data = object_store::read(&repo.root, &hash).unwrap();
+                let commit = Commit::parse(&commit_data);
+                Tree::get_entries_map(&repo.root, &commit.tree_hash).unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
+
+            let result = domain::status::calculate_status(&repo.root, &head_entries).unwrap();
+
+            println!("On branch main\n");
+            if result.changes.is_empty() {
+                println!("nothing to commit, working tree clean");
+            } else {
+                for (name, state) in result.changes {
+                    let color = match state {
+                        FileState::Modified => "\x1b[31mmodified:  ",
+                        FileState::Untracked=> "\x1b[31muntracked:  ",
+                        FileState::Deleted=> "\x1b[31mdeleted:  ",
+                    };
+                    println!("{} {}\x1b[0m", color, name);
+                }
             }
         }
     }
